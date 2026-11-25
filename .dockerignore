@@ -1,0 +1,25 @@
+# Secrets and local settings never go into the image.
+# config/ and secrets/ are mounted at runtime by docker-compose.yml.
+.env
+.env.*
+secrets/
+*.pem
+config/
+
+# Runtime data (Docker volumes in production)
+data/
+exports/
+
+# Not needed to build or run the app
+.git/
+.github/
+.venv/
+docs/
+tests/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,66 @@
+# Three services: the agent API, Open WebUI (the chat) and Caddy (HTTPS).
+# All values come from .env (copy .env.example). Only Caddy publishes ports.
+
+services:
+  agent:
+    build: .
+    env_file: .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./secrets:/app/secrets:ro
+      - agent-data:/app/data
+      - agent-exports:/app/exports
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    depends_on:
+      - agent
+    environment:
+      # The agent is the only model provider.
+      OPENAI_API_BASE_URL: http://agent:8000/v1
+      OPENAI_API_KEY: ${AGENT_API_KEY}
+      ENABLE_OLLAMA_API: "false"
+      DEFAULT_MODELS: analytics-agent
+      # Models from a connection are admin-only by default. The agent is the only
+      # model, so every approved user may use it.
+      BYPASS_MODEL_ACCESS_CONTROL: "true"
+      WEBUI_URL: ${WEBUI_URL}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      # "Continue with Google". New users wait as "pending" until an admin approves them.
+      ENABLE_OAUTH_SIGNUP: "true"
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${WEBUI_URL}/oauth/google/callback
+      DEFAULT_USER_ROLE: pending
+      # Open WebUI's own background LLM calls would all go to the agent. Turn them off.
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_SEARCH_QUERY_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  agent-data:
+  agent-exports:
+  open-webui-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,14 @@
+# DOMAIN comes from .env. Use "http://localhost" for a local run, or your
+# domain (e.g. analytics.example.com) on a server: Caddy then gets an HTTPS
+# certificate for it automatically.
+{$DOMAIN} {
+	# CSV and chart files are served by the agent.
+	handle /downloads/* {
+		reverse_proxy agent:8000
+	}
+
+	# Everything else is the chat UI.
+	handle {
+		reverse_proxy open-webui:8080
+	}
+}
