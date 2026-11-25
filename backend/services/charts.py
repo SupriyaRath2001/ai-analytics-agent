@@ -40,7 +40,9 @@ CHART_NAMES = {
 }
 
 # The theme changes matplotlib's global settings, so it is set once here, never per chart.
-sns.set_theme(style="whitegrid")
+# parse_math is off because matplotlib reads text between two "$" signs as math: a title like
+# "Revenue ($) vs cost ($)" came out garbled, and a label like "$5 #1 deal $" didn't draw at all.
+sns.set_theme(style="whitegrid", rc={"text.parse_math": False})
 
 
 class ChartSpec(BaseModel):
@@ -231,8 +233,11 @@ def _pie_slices(data: pd.DataFrame, spec: ChartSpec) -> pd.Series:
     keep = spec.top_n or PIE_SLICES
     if len(totals) <= keep:
         return totals
-    other = pd.Series([totals.iloc[keep:].sum()], index=["Other"])
-    return pd.concat([totals.iloc[:keep], other])
+    # A category the data already calls "Other" joins the grouped slice, so only one has that name.
+    is_other = np.array([str(label) == "Other" for label in totals.index], dtype=bool)
+    top = totals[~is_other].iloc[:keep]
+    other = pd.Series([totals.drop(top.index).sum()], index=["Other"])
+    return pd.concat([top, other])
 
 
 _DRAWERS: dict[str, Callable[[Axes, pd.DataFrame, ChartSpec], None]] = {

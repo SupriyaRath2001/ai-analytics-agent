@@ -22,6 +22,8 @@ DOWNLOAD_ICON = "⬇️"  # the down-arrow emoji at the start of download links
 # Integer columns whose names end in these words are labels, not amounts: 2024, not 2,024.
 # Names ending in "id" or "code" (customer_id, userId, zipcode, pincode) count too.
 _LABEL_WORDS = {"year", "zip", "pin", "phone"}
+# Ordinary words that end in "id" but name amounts and counts: amount_paid, max_bid, rows_valid.
+_NOT_ID_WORDS = set("paid unpaid prepaid repaid bid aid valid invalid void android".split())
 
 
 class RenderedResult(BaseModel):
@@ -120,6 +122,8 @@ def _looks_like_label(column_name: str) -> bool:
     if not words:
         return False
     last = words[-1].lower()
+    if last in _NOT_ID_WORDS:
+        return False
     return last.endswith(("id", "code")) or last in _LABEL_WORDS
 
 
