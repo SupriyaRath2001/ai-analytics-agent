@@ -19,6 +19,7 @@ dependencies = [
     "sqlglot>=25.0",
     "matplotlib>=3.9",
     "seaborn>=0.13",
+    "tzdata>=2024.1",  # timezone names work even in slim images without system tz files
 ]
 
 [project.optional-dependencies]
