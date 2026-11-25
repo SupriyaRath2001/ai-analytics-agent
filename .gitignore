@@ -1,0 +1,26 @@
+# Secrets and local settings: never commit these
+.env
+secrets/
+*.pem
+config/config.yaml
+config/business_context.md
+
+# Runtime data
+data/
+exports/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

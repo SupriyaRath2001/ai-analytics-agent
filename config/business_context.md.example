@@ -1,0 +1,21 @@
+# Business context (example)
+
+Copy this file to `config/business_context.md` and replace the content with your own rules.
+The agent adds this text to every prompt, so keep it short and factual.
+
+## Metrics
+- **Revenue** = `SUM(order_amount)` from `sales.orders` where `status = 'paid'`,
+  minus `SUM(refund_amount)` from `sales.refunds`.
+- **Active customer** = a customer with at least one paid order in the last 90 days.
+
+## Business words
+- "clients" means the `sales.customers` table.
+- "GMV" means gross order value before refunds and discounts.
+
+## Always apply
+- Exclude test accounts: `customers.is_test = FALSE`.
+- Ignore soft-deleted rows: `is_deleted = FALSE`.
+
+## Calendar
+- The financial year runs from April to March.
+- Weeks start on Monday.

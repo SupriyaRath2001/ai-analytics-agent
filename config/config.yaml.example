@@ -1,0 +1,33 @@
+# Copy this file to config/config.yaml.
+# ${VAR} values are read from .env; ${VAR:-default} uses the default when VAR is empty.
+
+connections:
+  - name: bigquery
+    type: bigquery
+    project: ${GCP_PROJECT}
+    credentials_path: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+    include_datasets: []        # empty = every dataset in the project
+    exclude_datasets: []
+    exclude_tables: []          # e.g. ["staging.tmp_orders"]
+    max_bytes_billed_gb: 50     # safety net per query; delete this line to turn it off
+    query_timeout_sec: 120
+    max_rows_fetch: 50000       # bigger results are not downloaded; the user is asked to narrow the question
+
+llm:
+  fast_model: ${FAST_MODEL}     # easy steps: routing, table summaries, chart specs
+  smart_model: ${SMART_MODEL}   # writing and fixing SQL
+  api_key: ${LLM_API_KEY:-}
+  api_base: ${LLM_API_BASE:-}
+
+output:
+  inline_table_max_rows: 20     # up to this many rows are shown as a table in the chat
+  inline_table_max_columns: 12  # wider results get a preview + CSV link instead
+  preview_rows: 5
+  export_dir: exports
+  export_ttl_hours: 24          # CSV and chart files are deleted after this
+  public_base_url: ${PUBLIC_BASE_URL:-}
+
+timezone: ${TZ:-UTC}
+kb_path: data/kb_cache.duckdb
+business_context_path: config/business_context.md
+agent_api_key: ${AGENT_API_KEY:-}
