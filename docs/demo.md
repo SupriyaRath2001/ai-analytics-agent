@@ -34,6 +34,11 @@ CREATE OR REPLACE TABLE demo_shop.distribution_centers AS
 
 That gives you 6 small tables in a dataset called `demo_shop`.
 
+For a richer test set, run [`scripts/demo_data.sql`](../scripts/demo_data.sql) instead. It has the
+same 6 tables plus website clicks (`events`), two helper tables (clean country names and monthly
+revenue targets), table descriptions and monthly partitions. In step 5 you then wait for
+`curated 9/9 tables`.
+
 ## 2. Create the VM (in Cloud Shell)
 
 ```bash
