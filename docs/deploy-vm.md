@@ -10,6 +10,9 @@ You need:
 - an API key for your LLM provider,
 - the `gcloud` CLI, for example in Cloud Shell.
 
+**Shortcut:** `bash scripts/gcloud-setup.sh YOUR_PROJECT_ID [ZONE]` does steps 1 to 3 for you
+(and installs Docker on the VM, so step 6 is not needed). Then continue at step 4.
+
 Set these once in your shell. The commands below use them.
 
 ```bash
