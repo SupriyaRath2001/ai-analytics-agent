@@ -43,6 +43,9 @@ shows a single model, `analytics-agent`.
 
 ## Quick start (local)
 
+> **Want a demo first?** [docs/demo.md](docs/demo.md) runs the whole app on a small Google Cloud
+> VM against Google's public demo shop data in about 20 minutes, with test questions to try.
+
 You need Docker with Compose, an API key for an LLM provider, and a Google Cloud service-account
 key with the roles **BigQuery Data Viewer** and **BigQuery Job User**.
 
