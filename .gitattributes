@@ -1,3 +1,6 @@
 # Keep LF line endings in the repo on every OS (the code runs on Linux in Docker).
 * text=auto eol=lf
+# Windows-only scripts get Windows (CRLF) line endings when checked out.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
 *.png binary

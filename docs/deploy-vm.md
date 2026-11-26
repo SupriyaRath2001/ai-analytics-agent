@@ -196,6 +196,27 @@ To see the agent's status (whether table summaries are done, how many tables it 
 docker compose exec agent python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/health').read().decode())"
 ```
 
+## Start and stop the VM
+
+The VM costs money while it runs, so stop it when nobody needs it. After a start, the IP address is
+the same and the app starts by itself within 1 to 2 minutes.
+
+- **Windows:** double-click `scripts\vm-start.cmd`, `scripts\vm-stop.cmd` or
+  `scripts\vm-status.cmd`, or run them in PowerShell. They work even when Windows blocks
+  PowerShell scripts.
+- **Cloud Shell, Linux, macOS:** `bash scripts/vm.sh start` (or `stop`, `status`).
+- **Cloud Console:** Compute Engine → VM instances → tick the VM → **Stop** or **Start / Resume**.
+
+The scripts use your gcloud sign-in, the project from `gcloud config set project` and the zone
+`asia-south1-a`. For another zone, run `scripts\vm-start.cmd -Zone ZONE` or
+`bash scripts/vm.sh start PROJECT_ID ZONE`. If something is wrong, they say what to do: for
+example, they sign you in again when the sign-in has expired, and they explain a missing permission
+or billing that is turned off. Starting and stopping needs the Owner or Compute Instance Admin
+role.
+
+A stopped VM still costs a little: the disk and the static IP address are billed until you
+delete them.
+
 ## Updating
 
 ```bash
