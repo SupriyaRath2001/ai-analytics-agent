@@ -139,8 +139,10 @@ connections:
 
 Add the new variables, empty, to `.env.example`. Passwords and keys only ever go in `.env`.
 
-In v1 the agent uses the first enabled connection only (cross-database questions are not in v1).
-To try your connector, list it first or set `enabled: false` on the BigQuery connection.
+In v1 the agent answers from one connection only: the first one in `connections` that connected
+at startup (cross-database questions are not in v1). A connection that fails to connect is
+logged and skipped, so the agent then quietly uses the next one. To try your connector, list it
+first and check the startup log, or set `enabled: false` on the BigQuery connection.
 
 The prompts in `backend/agent/prompts.py` were written for BigQuery (GoogleSQL,
 `CURRENT_DATE('<tz>')`). Put your dialect's rules in `sql_hints()` and check the prompts for

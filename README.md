@@ -56,7 +56,8 @@ cp config/config.yaml.example config/config.yaml
 Edit `.env`:
 
 - `FAST_MODEL`, `SMART_MODEL`, `LLM_API_KEY`: [LiteLLM](https://docs.litellm.ai) model strings
-  and your provider's key.
+  and your provider's key. The key is used for both models; to mix providers, see the note in
+  `.env.example`.
 - `GCP_PROJECT`: the project that holds your BigQuery data.
 - Save the service-account key as `secrets/sa.json` and set
   `GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/sa.json`.

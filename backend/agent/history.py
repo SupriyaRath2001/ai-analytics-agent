@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 
 # Open WebUI sends its own background jobs (chat titles, tags, follow-up suggestions) to the
-# selected model. Their prompts start with this marker.
+# selected model. Their prompts start with this marker and quote the chat in this tag. Its RAG
+# template (a question with attached files) starts with the marker too, but quotes no chat.
 OPENWEBUI_TASK_PREFIX = "### Task:"
+OPENWEBUI_CHAT_HISTORY_TAG = "<chat_history>"
 
 _SQL_BLOCK = re.compile(r"```sql[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DETAILS_BLOCK = re.compile(r"<details>.*?</details>", re.DOTALL | re.IGNORECASE)
@@ -70,7 +72,8 @@ def clean_history(messages: list[dict], max_messages: int = 10) -> list[dict]:
 
 
 def is_openwebui_task(text: str) -> bool:
-    return text.lstrip().startswith(OPENWEBUI_TASK_PREFIX)
+    """True for a background job about the chat, which needs no data; False for a real question."""
+    return text.lstrip().startswith(OPENWEBUI_TASK_PREFIX) and OPENWEBUI_CHAT_HISTORY_TAG in text
 
 
 def _slim_answer(text: str) -> str:

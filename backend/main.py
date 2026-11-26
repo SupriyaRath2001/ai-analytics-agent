@@ -16,6 +16,8 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 
+from anyio import to_thread
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -33,6 +35,7 @@ log = logging.getLogger(__name__)
 
 MODEL_ID = "analytics-agent"
 EXPORT_CLEANUP_INTERVAL_SEC = 3600
+WORKER_THREADS = 100  # AnyIO's default is 40
 _STARTED_AT = int(time.time())  # the "created" time OpenAI's model list asks for
 
 
@@ -46,6 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # A streaming answer holds a worker thread while it waits for the LLM or BigQuery, and
+    # downloads need threads too. With 40, forty slow answers would block every download.
+    to_thread.current_default_thread_limiter().total_tokens = WORKER_THREADS
+    load_dotenv()  # fills in ${VAR} values from .env; real environment variables win
     config = load_config()
     kb = KBCache(config.kb_path)
     llm = LLMClient(config.llm)
@@ -65,10 +72,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.kb = kb
     app.state.store = store
     app.state.curator = curator
-    app.state.agent = AnalyticsAgent(config, connectors, kb, llm, store)
+    app.state.agent = AnalyticsAgent(
+        config, connectors, kb, llm, store, curation_status=lambda: curator.status
+    )
     yield
 
     stop_cleanup.set()
+    curator.stop()  # don't wait for the rest of the curation queue
     for name, connector in connectors.items():
         try:
             connector.close()
@@ -107,8 +117,11 @@ def _clean_exports(store: ExportStore, stop: threading.Event) -> None:
             log.exception("could not clean up expired export files")
 
 
-def require_api_key(request: Request) -> None:
-    """Bearer auth for /v1/* when agent_api_key is set. Open WebUI sends it as its OpenAI key."""
+async def require_api_key(request: Request) -> None:
+    """Bearer auth for /v1/* when agent_api_key is set. Open WebUI sends it as its OpenAI key.
+
+    async, like /v1/models: a plain def dependency would wait for a worker thread too.
+    """
     expected = request.app.state.config.agent_api_key
     if not expected:
         return
@@ -128,7 +141,8 @@ v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
 
 
 @public.get("/health")
-def health(request: Request) -> dict:
+async def health(request: Request) -> dict:
+    """async so it answers even when every worker thread is busy. kb.stats() is one quick query."""
     state = request.app.state
     return {"status": "ok", "curation": state.curator.status, "kb": state.kb.stats()}
 
@@ -150,7 +164,7 @@ def get_download(file_name: str, request: Request, download: bool = False) -> Fi
 
 
 @v1.get("/models")
-def list_models() -> dict:
+async def list_models() -> dict:
     model = {
         "id": MODEL_ID,
         "object": "model",

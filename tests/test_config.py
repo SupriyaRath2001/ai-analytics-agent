@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import dotenv.main
 import pytest
 
 from backend.config import ConfigError, load_config
@@ -46,6 +47,17 @@ def test_env_values_and_defaults_are_filled_in(config_file, monkeypatch):
 
 
 def test_missing_env_var_names_the_variable(config_file):
+    with pytest.raises(ConfigError, match="GCP_PROJECT"):
+        load_config(config_file)
+
+
+def test_a_dotenv_file_is_not_read(config_file, tmp_path, monkeypatch):
+    # main.py loads .env at startup. If load_config did too, a developer's .env would leak
+    # into the tests. load_dotenv() finds its file with find_dotenv(): point that at one.
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("GCP_PROJECT=from-dotenv\n", encoding="utf-8")
+    monkeypatch.setattr(dotenv.main, "find_dotenv", lambda *args, **kwargs: str(dotenv_file))
+
     with pytest.raises(ConfigError, match="GCP_PROJECT"):
         load_config(config_file)
 

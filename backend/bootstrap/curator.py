@@ -8,6 +8,7 @@ changed since the last start are skipped, so a restart costs no profiling and no
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -57,6 +58,15 @@ class Curator:
         self.business_context_path = business_context_path
         self.max_workers = max_workers
         self.status = "idle"  # shown by /health: idle -> running -> done, or failed
+        self._stopping = threading.Event()
+
+    def stop(self) -> None:
+        """Called at shutdown, so the app doesn't wait for every queued table to be curated.
+
+        Calls already under way finish, but their results aren't saved. The tables not
+        curated yet are picked up on the next start.
+        """
+        self._stopping.set()
 
     def run(self) -> None:
         """The whole startup pass. Problems are logged, never raised, so the API keeps serving."""
@@ -78,14 +88,18 @@ class Curator:
         """Save every table's catalog metadata and forget tables that were dropped.
 
         Returns the tables that need curating. A connection whose catalog can't be read is
-        skipped and its cached tables are kept, so one bad start doesn't empty the KB.
+        skipped and its cached tables are kept, so one bad start doesn't empty the KB. When
+        no catalog at all could be read, it raises, so the run ends as "failed" and the chat
+        can say so instead of "still loading" forever.
         """
         pending: list[TableMeta] = []
+        unreadable = 0
         for name, connector in self.connectors.items():
             try:
                 tables = connector.fetch_raw_metadata()
             except Exception:
                 log.exception("could not read the tables of %r; its cached tables are kept", name)
+                unreadable += 1
                 continue
             to_curate = []
             for table in tables:
@@ -100,14 +114,19 @@ class Curator:
                 removed,
             )
             pending.extend(to_curate)
+        if self.connectors and unreadable == len(self.connectors):
+            raise RuntimeError("could not read the tables of any connection, see the errors above")
         return pending
 
     def curate_table(self, table: TableMeta) -> None:
         """Profile one table, have the fast model describe it and save the result.
 
         Raises when the connector, the model or the KB fails; the table then stays
-        uncurated and the next start tries again.
+        uncurated and the next start tries again. After stop() it does nothing, so shutdown
+        doesn't wait for the queue or write to a KB that is being closed.
         """
+        if self._stopping.is_set():
+            return
         connector = self.connectors[table.connection]
         samples = connector.sample_column_values(table, [column.name for column in table.columns])
         messages = [
@@ -115,6 +134,8 @@ class Curator:
             {"role": "user", "content": _table_prompt(table, samples)},
         ]
         curation = self.llm.complete_json(messages, TableCuration, tier="fast")
+        if self._stopping.is_set():
+            return
         self.kb.save_curation(
             table.connection,
             table.qualified_name,
@@ -134,6 +155,14 @@ class Curator:
         with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="curator") as pool:
             futures = {pool.submit(self.curate_table, table): table for table in tables}
             for future in as_completed(futures):
+                if self._stopping.is_set():
+                    pool.shutdown(cancel_futures=True)  # drop the queued tables
+                    log.info(
+                        "curation stopped at %d/%d tables, the rest wait for the next start",
+                        curated,
+                        total,
+                    )
+                    return
                 name = futures[future].qualified_name
                 try:
                     future.result()

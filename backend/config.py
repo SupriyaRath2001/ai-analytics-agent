@@ -9,7 +9,6 @@ from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from dotenv import load_dotenv
 from pydantic import (
     BaseModel,
     BeforeValidator,
@@ -133,8 +132,11 @@ def _expand_all(value: Any) -> Any:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    """Read the YAML config. ``CONFIG_PATH`` overrides the default location."""
-    load_dotenv()  # picks up .env if present; real environment variables win
+    """Read the YAML config. ``CONFIG_PATH`` overrides the default location.
+
+    ``${VAR}`` values come from the environment only. The app loads ``.env`` at startup
+    (main.py), so a developer's ``.env`` can't change what the tests see.
+    """
     path = Path(path or os.environ.get("CONFIG_PATH", DEFAULT_CONFIG_PATH))
     if not path.exists():
         raise ConfigError(

@@ -93,6 +93,16 @@ class FakeLLM:
         return sorted(call["table"] for call in self.calls)
 
 
+class ShutdownLLM(FakeLLM):
+    """The app shuts down while the model describes the first table."""
+
+    curator = None
+
+    def complete_json(self, messages, schema, tier="fast"):
+        self.curator.stop()
+        return super().complete_json(messages, schema, tier)
+
+
 @pytest.fixture
 def kb(tmp_path):
     cache = KBCache(tmp_path / "kb.duckdb")
@@ -231,6 +241,39 @@ def test_a_connection_that_cannot_be_read_keeps_its_cached_tables(kb, connector)
     assert curator.status == "done"
     assert [t.qualified_name for t in kb.list_tables("warehouse")] == [CUSTOMERS, ORDERS]
     assert kb.list_tables("other") == []
+
+
+def test_the_run_fails_when_no_catalog_can_be_read(kb, connector, caplog):
+    connector.broken = True
+
+    with caplog.at_level(logging.ERROR, logger="backend.bootstrap.curator"):
+        curator, llm = start(kb, connector)
+
+    # "failed", not "done": the chat tells the user to check the logs instead of waiting.
+    assert curator.status == "failed"
+    assert kb.stats() == {"tables": 0, "curated": 0}
+    assert llm.calls == []
+    assert "403 Access Denied" in caplog.text
+    assert "could not read the tables of any connection" in caplog.text
+
+
+def test_stop_drops_the_queue_and_saves_nothing_more(kb, caplog):
+    connector = FakeConnector([make_table(f"t{i}") for i in range(6)])
+    llm = ShutdownLLM()
+    curator = Curator({"warehouse": connector}, kb, llm, max_workers=1)
+    llm.curator = curator
+
+    with caplog.at_level(logging.INFO, logger="backend.bootstrap.curator"):
+        curator.run()
+
+    assert len(llm.calls) == 1  # the call under way finished, the queued tables were skipped
+    assert len(connector.sampled) == 1
+    assert kb.stats() == {"tables": 6, "curated": 0}  # its result came after stop()
+    assert "curation stopped at 0/6 tables" in caplog.text
+
+    _, llm = start(kb, connector)
+
+    assert len(llm.calls) == 6  # the next start curates them all
 
 
 def test_business_context_is_loaded(kb, connector, tmp_path):

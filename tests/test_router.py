@@ -156,14 +156,14 @@ def store(tmp_path):
     return ExportStore(tmp_path / "exports")
 
 
-def make_agent(kb, store, llm, connector):
+def make_agent(kb, store, llm, connector, curation_status=None):
     config = AppConfig(
         connections=[ConnectionConfig(name="warehouse", type="fake")],
         llm=LLMConfig(fast_model="fake/fast", smart_model="fake/smart"),
         timezone="Asia/Kolkata",
     )
     connectors = {connector.name: connector} if connector else {}
-    return AnalyticsAgent(config, connectors, kb, llm, store)
+    return AnalyticsAgent(config, connectors, kb, llm, store, curation_status=curation_status)
 
 
 def user(text):
@@ -198,7 +198,10 @@ def assert_in_order(text, *parts):
 def test_openwebui_task_goes_straight_to_the_fast_model(kb, store):
     llm = FakeLLM(text='{"title": "Orders by status"}')
     connector = FakeConnector()
-    task = "### Task:\nGenerate a concise title for this chat."
+    task = (
+        "### Task:\nGenerate a concise title for this chat.\n"
+        "<chat_history>\nUSER: Orders by status?\n</chat_history>"
+    )
 
     chunks = list(make_agent(kb, store, llm, connector).run([user(task)]))
 
@@ -220,7 +223,8 @@ def test_metadata_answer_comes_from_the_kb_without_bigquery(kb, store):
     assert_in_order(
         prompt["content"],
         "Business context:\nRevenue means paid orders only.",
-        "`my-project.sales.orders` (table, 1,200 rows)\nSummary: One row per customer order.",
+        "`my-project.sales.orders` (table), about 1,200 rows (when the agent started)\n"
+        "Summary: One row per customer order.",
         '- status (STRING): Payment state of the order; values: ["paid", "refunded", "pending"]',
         "- amount (NUMERIC): Order value",
         "- created_at (TIMESTAMP, partition column)",
@@ -256,7 +260,47 @@ def test_inline_result_has_takeaway_table_csv_link_and_sql(kb, store):
         "text": "fast",
     }
     [takeaway] = llm.chats("text")
-    assert "| refunded | 8 |" in takeaway[-1]["content"]
+    raw_rows = "Result (CSV):\nstatus,orders\npaid,120\nrefunded,8\npending,15"
+    assert raw_rows in takeaway[-1]["content"]
+
+
+def test_takeaway_sees_raw_values_and_the_times_the_table_shows(kb, store):
+    df = pd.DataFrame(
+        {
+            "signed_up": pd.to_datetime(["2026-03-01 04:30:00", "2026-03-02 18:45:00"]),
+            "conversion": [0.004123, 0.0049],
+            "revenue": [1234.5678, 98765.4321],
+        }
+    )
+    df["signed_up"] = df["signed_up"].dt.tz_localize("UTC")  # BigQuery TIMESTAMPs are UTC
+    llm = data_llm(SqlDraft(sql=SQL))
+    connector = FakeConnector(results=[result(df)])
+
+    text = ask(make_agent(kb, store, llm, connector), "Conversion by signup time?")
+
+    [(system, prompt)] = llm.chats("text")
+    assert "raw, unrounded values. Round numbers sensibly" in system["content"]
+    assert_in_order(
+        prompt["content"],
+        "Result (CSV):\nsigned_up,conversion,revenue",
+        "2026-03-01 10:00:00+05:30,0.004123,1234.5678",
+        "2026-03-03 00:15:00+05:30,0.0049,98765.4321",
+    )
+    # The chat table shows the same local times, in the configured timezone.
+    assert_in_order(text, "| 2026-03-01 10:00:00 |", "| 2026-03-03 00:15:00 |")
+
+
+def test_takeaway_keeps_end_of_time_timestamps_in_utc(kb, store):
+    # 9999-12-31 means "no end date". East of UTC it would be the year 10000.
+    valid_to = pd.Series([pd.Timestamp("9999-12-31 23:59:59", tz="UTC").as_unit("us")])
+    df = pd.DataFrame({"plan": ["pro"], "valid_to": valid_to})
+    llm = data_llm(SqlDraft(sql=SQL))
+    connector = FakeConnector(results=[result(df)])
+
+    ask(make_agent(kb, store, llm, connector), "Until when is the pro plan valid?")
+
+    [takeaway] = llm.chats("text")
+    assert "pro,9999-12-31 23:59:59+00:00" in takeaway[-1]["content"]
 
 
 def test_large_result_shows_a_preview_and_the_row_count(kb, store):
@@ -477,9 +521,10 @@ def test_help_answer_uses_real_table_names_without_a_model(kb, store):
         text,
         "I answer questions about your BigQuery data in plain English.",
         "- What columns are in `sales.customers` and what do they mean?",
-        "- Show 10 sample rows from `sales.orders`.",
+        "- How many rows does `sales.orders` have?",
         "- Count the rows in `sales.customers` per month and show it as a chart.",
     )
+    assert "sample rows" not in text  # SELECT * ... LIMIT 10 still scans the whole table
     assert llm.chats("text") == []
 
 
@@ -512,6 +557,30 @@ def test_empty_kb_says_the_schema_is_still_being_read(tmp_path, store, intent):
     empty.close()
     assert text.startswith("I'm still reading the schema")
     assert "try again in a minute" in text
+
+
+@pytest.mark.parametrize(
+    ("status", "start", "also"),
+    [
+        ("idle", "I'm still reading the schema", "try again in a minute"),
+        ("running", "I'm still reading the schema", "try again in a minute"),
+        ("failed", "I couldn't read the list of tables from BigQuery", "check the agent logs"),
+        ("done", "I didn't find any tables in BigQuery", "include and exclude lists"),
+    ],
+)
+def test_empty_kb_reply_follows_the_curation_status(tmp_path, store, status, start, also):
+    empty = KBCache(tmp_path / "empty.duckdb")
+    llm = FakeLLM({Route: [Route(intent="data")]})
+    agent = make_agent(empty, store, llm, FakeConnector(), curation_status=lambda: status)
+
+    text = ask(agent, "Orders by status?")
+
+    empty.close()
+    assert text.startswith(start)
+    assert also in text
+    if status == "failed":
+        assert "permissions problem or a wrong project name" in text
+        assert "try again in a minute" not in text  # waiting won't help
 
 
 def test_with_many_tables_the_fast_model_picks_at_most_five(many_tables_kb, store):
@@ -580,6 +649,7 @@ def test_sql_prompt_has_the_rules_the_context_and_the_previous_sql(kb, store):
         "- Name every table in full, in backticks.",
         f"{today}, in the Asia/Kolkata timezone",
         "CURRENT_DATE('Asia/Kolkata')",
+        "result are shown to the user in the Asia/Kolkata timezone automatically",
         "never add up\n  amounts in different currencies",
         "ask a clarifying question only when a wrong guess would mislead",
     ]:

@@ -19,6 +19,15 @@ SCHEMA_LOADING = (
     "I'm still reading the schema of your BigQuery tables. Please try again in a minute. "
     "If this keeps happening, check the agent logs."
 )
+CATALOG_FAILED = (
+    "I couldn't read the list of tables from BigQuery, so I can't answer questions about the "
+    "data yet. This is usually a permissions problem or a wrong project name. Please check the "
+    "agent logs."
+)
+NO_TABLES = (
+    "I didn't find any tables in BigQuery. Check the project name and the dataset include and "
+    "exclude lists in `config/config.yaml`, and that the service account can see the datasets."
+)
 LLM_FAILED = "The language model didn't respond. Please try again in a moment."
 UNEXPECTED_ERROR = (
     "Sorry, something went wrong while answering. Please try again, and if it keeps "
@@ -64,9 +73,11 @@ def help_text(tables: list[TableInfo]) -> str:
     names = [f"`{short_name(table)}`" for table in tables[:3]]
     if names:
         first, second, third = (names * 3)[:3]
+        # Cheap questions only: "show 10 sample rows" scans the whole table in BigQuery,
+        # because a LIMIT doesn't reduce the bytes read.
         examples = [
             f"What columns are in {first} and what do they mean?",
-            f"Show 10 sample rows from {second}.",
+            f"How many rows does {second} have?",
             f"Count the rows in {third} per month and show it as a chart.",
         ]
     else:

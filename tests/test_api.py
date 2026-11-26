@@ -1,11 +1,17 @@
+import inspect
 import json
 import logging
+import time
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from anyio import to_thread
 from fastapi.testclient import TestClient
 
+from backend import main
+from backend.bootstrap.curator import Curator
+from backend.bootstrap.kb_cache import KBCache
 from backend.config import AppConfig, LLMConfig
 from backend.connectors import registry
 from backend.connectors.base import BaseDBConnector
@@ -190,8 +196,15 @@ def test_health_reports_curation_and_kb_counts(client):
     }
 
 
+def test_health_and_models_never_wait_for_a_worker_thread():
+    # A plain def endpoint or dependency runs in AnyIO's thread pool, where slow chat streams
+    # can hold every thread. The Docker health check and Open WebUI must still get an answer.
+    for function in (main.health, main.list_models, main.require_api_key):
+        assert inspect.iscoroutinefunction(function), function.__name__
+
+
 class StartupConnector(BaseDBConnector):
-    """Connects, unless its connection is named "broken"."""
+    """Connects, unless its connection is named "broken". "unreadable" can't list its tables."""
 
     type_name = "startup-fake"
 
@@ -208,6 +221,8 @@ class StartupConnector(BaseDBConnector):
             raise RuntimeError("403 Access Denied")
 
     def fetch_raw_metadata(self):
+        if self.name == "unreadable":
+            raise RuntimeError("403 Access Denied")
         return []
 
     def sample_column_values(self, table, columns, limit=15):
@@ -223,22 +238,46 @@ class StartupConnector(BaseDBConnector):
         self.closed = True
 
 
-def test_startup_keeps_running_when_a_connection_fails(tmp_path, monkeypatch, caplog):
+@pytest.fixture
+def configured_app(tmp_path, monkeypatch):
+    """make(*connection_names) -> an app whose lifespan runs on a temporary config.
+
+    The real load_dotenv would copy a developer's .env into os.environ for the rest of the
+    run. The fake sets AGENT_API_KEY instead, which the config needs, so the app only starts
+    when .env is loaded before the config.
+    """
     monkeypatch.setitem(registry.CONNECTOR_TYPES, "startup-fake", StartupConnector)
-    config = {
-        "connections": [
-            {"name": "broken", "type": "startup-fake"},
-            {"name": "warehouse", "type": "startup-fake"},
-        ],
-        "llm": {"fast_model": "fake/fast", "smart_model": "fake/smart"},
-        "kb_path": str(tmp_path / "kb.duckdb"),
-        "business_context_path": None,
-        "output": {"export_dir": str(tmp_path / "exports")},
-    }
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(json.dumps(config), encoding="utf-8")  # JSON is valid YAML
-    monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    app = create_app()
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.setattr(
+        main, "load_dotenv", lambda: monkeypatch.setenv("AGENT_API_KEY", "from-dotenv")
+    )
+
+    def make(*connection_names):
+        config = {
+            "connections": [{"name": name, "type": "startup-fake"} for name in connection_names],
+            "llm": {"fast_model": "fake/fast", "smart_model": "fake/smart"},
+            "kb_path": str(tmp_path / "kb.duckdb"),
+            "business_context_path": None,
+            "output": {"export_dir": str(tmp_path / "exports")},
+            "agent_api_key": "${AGENT_API_KEY}",
+        }
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(json.dumps(config), encoding="utf-8")  # JSON is valid YAML
+        monkeypatch.setenv("CONFIG_PATH", str(config_path))
+        return create_app()
+
+    return make
+
+
+def wait_for_curation(curator):
+    deadline = time.monotonic() + 10
+    while curator.status not in ("done", "failed"):
+        assert time.monotonic() < deadline, "the curator never finished"
+        time.sleep(0.01)
+
+
+def test_startup_keeps_running_when_a_connection_fails(configured_app, caplog):
+    app = configured_app("broken", "warehouse")
 
     with caplog.at_level(logging.ERROR, logger="backend.main"), TestClient(app) as client:
         health = client.get("/health")
@@ -249,3 +288,56 @@ def test_startup_keeps_running_when_a_connection_fails(tmp_path, monkeypatch, ca
     assert list(connectors) == ["warehouse"]
     assert connectors["warehouse"].closed is True
     assert "could not connect to 'broken'" in caplog.text
+
+
+def test_startup_loads_dotenv_before_the_config(configured_app):
+    app = configured_app("warehouse")
+
+    with TestClient(app):
+        config = app.state.config
+
+    assert config.agent_api_key == "from-dotenv"
+
+
+def test_startup_allows_100_worker_threads(configured_app):
+    app = configured_app("warehouse")
+
+    with TestClient(app) as client:
+        # The limiter belongs to the event loop, so read it there.
+        limit = client.portal.call(lambda: to_thread.current_default_thread_limiter().total_tokens)
+
+    assert limit == 100
+
+
+def test_the_agent_sees_that_the_catalog_could_not_be_read(configured_app):
+    app = configured_app("unreadable")
+
+    with TestClient(app) as client:
+        wait_for_curation(app.state.curator)
+        health = client.get("/health").json()
+        status = app.state.agent.curation_status()
+
+    assert health["curation"] == "failed"
+    assert status == "failed"  # so the chat says "check the logs", not "try again in a minute"
+
+
+def test_shutdown_stops_the_curator_before_closing_the_kb(configured_app, monkeypatch):
+    events = []
+    real_stop, real_close = Curator.stop, KBCache.close
+
+    def stop(curator):
+        events.append("curator stopped")
+        real_stop(curator)
+
+    def close(kb):
+        events.append("kb closed")
+        real_close(kb)
+
+    monkeypatch.setattr(Curator, "stop", stop)
+    monkeypatch.setattr(KBCache, "close", close)
+    app = configured_app("warehouse")
+
+    with TestClient(app):
+        assert events == []
+
+    assert events == ["curator stopped", "kb closed"]

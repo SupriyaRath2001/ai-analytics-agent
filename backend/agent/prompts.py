@@ -13,12 +13,16 @@ from datetime import date
 
 import pandas as pd
 
+from backend.bootstrap.curator import MAX_PROMPT_COLUMNS
 from backend.bootstrap.kb_cache import ColumnInfo, TableDetail, TableInfo
 from backend.services.renderer import df_to_markdown
 
 # The router sees every table name up to this many; with more, the datasets and their counts.
 MAX_ROUTER_TABLE_NAMES = 150
 MAX_SUMMARY_CHARS = 300
+# The one-line catalog stops at about this size, so a project with thousands of tables still
+# fits the fast model's context.
+MAX_CATALOG_CHARS = 30_000
 CHART_SAMPLE_ROWS = 5
 
 ROUTE_SYSTEM = """\
@@ -64,7 +68,9 @@ with their types, descriptions, meanings and sample values.
 
 TAKEAWAY_SYSTEM = """\
 You write the takeaway shown above a query result in a chat: 1-2 plain sentences that answer
-the question with the key numbers from the result, written as they appear there.
+the question with the key numbers from the result.
+- The result is CSV with the raw, unrounded values. Round numbers sensibly when you write
+  them, with thousands separators: for example 1,234,567, about 1.2 million, 12.3% or 0.042.
 - Don't list every row and don't guess at causes.
 - Never add up or compare amounts in different currencies as if they were one.
 - Plain text only: no headings, lists or tables."""
@@ -149,7 +155,9 @@ GoogleSQL rules:
 
 Dates: today is {today:%A}, {today.isoformat()}, in the {timezone} timezone. For "today", "this
 month", "last 7 days" and the like, use CURRENT_DATE('{timezone}'), never a fixed date. To
-group or filter a TIMESTAMP by local day, use DATE(ts, '{timezone}').
+group or filter a TIMESTAMP by local day, use DATE(ts, '{timezone}'). TIMESTAMP values in the
+result are shown to the user in the {timezone} timezone automatically, so return them as they
+are: don't convert them for display.
 
 More rules:
 - Use only the tables and columns you are given. Never guess other names.
@@ -186,7 +194,9 @@ def sql_fix_request(error: str) -> str:
 
 
 def takeaway_messages(question: str, result_table: str) -> list[dict]:
-    return _chat(TAKEAWAY_SYSTEM, ("Question", question), ("Result", result_table))
+    """``result_table`` is the result as CSV with raw values, so the takeaway's numbers are
+    exact: the chat table rounds them, and a rounded 0 or a cut-off decimal could mislead."""
+    return _chat(TAKEAWAY_SYSTEM, ("Question", question), ("Result (CSV)", result_table))
 
 
 def chart_messages(question: str, df: pd.DataFrame) -> list[dict]:
@@ -215,11 +225,19 @@ def table_names(tables: list[TableInfo]) -> str:
 
 
 def catalog(tables: list[TableInfo]) -> str:
-    """One "qualified_name — summary" line per table."""
-    return "\n".join(
-        f"- {table.qualified_name} — {summary_line(table) or '(no summary yet)'}"
-        for table in tables
-    )
+    """One "qualified_name — summary" line per table, up to about MAX_CATALOG_CHARS in all."""
+    lines: list[str] = []
+    size = 0
+    for table in tables:
+        line = f"- {table.qualified_name} — {summary_line(table) or '(no summary yet)'}"
+        size += len(line) + 1
+        if size > MAX_CATALOG_CHARS:
+            break
+        lines.append(line)
+    left_out = len(tables) - len(lines)
+    if left_out:
+        lines.append(f"(… {left_out:,} more {'table' if left_out == 1 else 'tables'} not listed)")
+    return "\n".join(lines)
 
 
 def table_details(tables: list[TableDetail]) -> str:
@@ -251,20 +269,28 @@ def _chat(system: str, *sections: tuple[str, str]) -> list[dict]:
 
 
 def _table_detail(table: TableDetail) -> str:
-    facts = table.table_type.lower()
+    header = f"`{table.qualified_name}` ({table.table_type.lower()})"
     if table.row_count is not None:
-        facts += f", {table.row_count:,} rows"
-    lines = [f"`{table.qualified_name}` ({facts})"]
+        header += f", about {table.row_count:,} rows (when the agent started)"
+    lines = [header]
     if table.summary:
         lines.append(f"Summary: {table.summary}")
     if table.description:
         lines.append(f"Description: {_one_line(table.description)}")
     lines.append("Columns:")
-    lines.extend(_column_line(column) for column in table.columns)
+    # The same columns the curator described. The partition column decides what a query
+    # costs, so it stays even past the cap (ingestion-time _PARTITIONTIME comes last).
+    shown = table.columns[:MAX_PROMPT_COLUMNS]
+    shown += [column for column in table.columns[MAX_PROMPT_COLUMNS:] if column.is_partition]
+    repeated = {column.name for column in table.columns if column.mode == "REPEATED"}
+    lines.extend(_column_line(column, repeated) for column in shown)
+    if len(shown) < len(table.columns):
+        lines.append(f"- … and {len(table.columns) - len(shown):,} more columns")
     return "\n".join(lines)
 
 
-def _column_line(column: ColumnInfo) -> str:
+def _column_line(column: ColumnInfo, repeated: set[str]) -> str:
+    """One column. ``repeated`` holds the table's REPEATED field paths."""
     kind = [column.data_type]
     if column.mode == "REPEATED":
         kind.append("REPEATED")
@@ -276,7 +302,26 @@ def _column_line(column: ColumnInfo) -> str:
     if column.sample_values:
         notes.append("values: " + json.dumps(column.sample_values, ensure_ascii=False))
     line = f"- {column.name} ({', '.join(kind)})"
-    return f"{line}: {'; '.join(notes)}" if notes else line
+    if notes:
+        line += f": {'; '.join(notes)}"
+    unnest = _unnest_note(column.name, repeated)
+    return f"{line} — {unnest}" if unnest else line
+
+
+def _unnest_note(path: str, repeated: set[str]) -> str:
+    """For a field inside REPEATED fields: that it needs UNNEST. "" for any other column.
+
+    The dot path alone reads like a plain struct field, but ``items.sku`` can't be selected
+    when ``items`` is an array.
+    """
+    parts = path.split(".")
+    parents = [".".join(parts[:end]) for end in range(1, len(parts))]
+    arrays = [parent for parent in parents if parent in repeated]
+    if not arrays:
+        return ""
+    if len(arrays) == 1:
+        return f"inside repeated {arrays[0]}, use UNNEST({arrays[0]})"
+    return f"inside repeated {' and '.join(arrays)}, UNNEST each of them, outermost first"
 
 
 def _one_line(text: str) -> str:

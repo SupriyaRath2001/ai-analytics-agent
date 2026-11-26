@@ -9,7 +9,7 @@ user asks for one, a chart.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -29,7 +29,6 @@ from backend.services.charts import ChartSpec, check_spec, render_chart
 from backend.services.exports import ExportStore
 from backend.services.renderer import (
     DOWNLOAD_ICON,
-    df_to_markdown,
     render_assumptions,
     render_result,
     render_sql_block,
@@ -63,12 +62,17 @@ class AnalyticsAgent:
         kb: KBCache,
         llm: LLMClient,
         store: ExportStore,
+        *,
+        curation_status: Callable[[], str] | None = None,
     ):
+        """``curation_status`` returns the curator's status. With an empty KB it tells
+        "still reading the tables" apart from "reading them failed"."""
         self.config = config
         self.connectors = connectors
         self.kb = kb
         self.llm = llm
         self.store = store
+        self.curation_status = curation_status
         # v1 answers from the first connection that connected.
         self.connector = next(iter(connectors.values()), None)
 
@@ -117,7 +121,7 @@ class AnalyticsAgent:
         if route.intent == "help":
             yield self._help()
         elif not tables:
-            yield replies.SCHEMA_LOADING
+            yield self._no_tables_reply()
         elif route.intent == "metadata":
             yield self._metadata_answer(tables, history, question)
         else:
@@ -126,6 +130,15 @@ class AnalyticsAgent:
     def _help(self) -> str:
         connection = self.connector.name if self.connector else None
         return replies.help_text(self.kb.list_tables(connection))
+
+    def _no_tables_reply(self) -> str:
+        """Why the KB has no tables yet: still being read, reading failed, or there are none."""
+        status = self.curation_status() if self.curation_status else "running"
+        if status == "failed":
+            return replies.CATALOG_FAILED
+        if status == "done":
+            return replies.NO_TABLES
+        return replies.SCHEMA_LOADING
 
     def _pick_tables(
         self, tables: list[TableInfo], history: list[dict], question: str
@@ -201,7 +214,9 @@ class AnalyticsAgent:
             yield "\n" + _join(replies.NO_ROWS, assumptions, sql_block)
             return
 
-        rendered = render_result(df, len(df), self.store, self.config.output)
+        rendered = render_result(
+            df, len(df), self.store, self.config.output, timezone=self.config.timezone
+        )
         chart = ""
         if wants_chart:
             yield "> Drawing the chart…\n"
@@ -212,9 +227,12 @@ class AnalyticsAgent:
         yield "\n" + _join(lead, rendered.markdown, chart, assumptions, sql_block, offer)
 
     def _takeaway(self, question: str, df: pd.DataFrame) -> str:
-        """1-2 sentences on what the result shows. The row count stands in if the model fails."""
+        """1-2 sentences on what the result shows. The row count stands in if the model fails.
+
+        Only called for inline results (at most inline_table_max_rows), so the CSV is small.
+        """
         try:
-            chat = prompts.takeaway_messages(question, df_to_markdown(df))
+            chat = prompts.takeaway_messages(question, _raw_csv(df, self.config.timezone))
             text = self.llm.complete(chat, tier="fast").strip()
         except LLMError as exc:
             log.warning("answering without a takeaway: %s", exc)
@@ -254,6 +272,21 @@ class AnalyticsAgent:
 def _join(*parts: str) -> str:
     """The non-empty parts of an answer, a blank line apart."""
     return "\n\n".join(part for part in parts if part)
+
+
+def _raw_csv(df: pd.DataFrame, timezone: str) -> str:
+    """The rows as CSV, unrounded. TIMESTAMP columns are moved to the timezone the chat table
+    shows them in, so the takeaway and the table name the same times."""
+    local = df.copy()
+    for name, column in df.items():
+        # A column with 9999-12-31 ("no end date") stays in UTC: east of UTC that is the
+        # year 10000, which pandas can't write out.
+        if (
+            isinstance(column.dtype, pd.DatetimeTZDtype)
+            and column.dropna().dt.year.between(2, 9998).all()
+        ):
+            local[name] = column.dt.tz_convert(timezone)
+    return local.to_csv(index=False)
 
 
 def _worth_a_chart(df: pd.DataFrame) -> bool:

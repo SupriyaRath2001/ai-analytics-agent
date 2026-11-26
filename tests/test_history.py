@@ -77,6 +77,33 @@ def test_clean_history_keeps_only_recent_turns():
     assert len(clean_history(chat, max_messages=4)) == 4
 
 
+TITLE_TASK = """### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Chat History:
+<chat_history>
+USER: Orders per month?
+</chat_history>"""
+
+# Open WebUI's RAG template, sent when the user attaches a file: a real question.
+RAG_PROMPT = """### Task:
+Respond to the user query using the provided context.
+
+<context>
+<source id="1">targets.pdf: March target is 1,300 orders.</source>
+</context>
+
+<user_query>
+Did we hit the March target?
+</user_query>"""
+
+
 def test_openwebui_task_prompts_are_detected():
-    assert is_openwebui_task("### Task:\nGenerate a concise title")
+    assert is_openwebui_task(TITLE_TASK)
+    assert is_openwebui_task("\n  " + TITLE_TASK)
+
+
+def test_questions_are_not_openwebui_tasks():
     assert not is_openwebui_task("What is the revenue by month?")
+    assert not is_openwebui_task(RAG_PROMPT)
+    # The tag alone isn't enough: the prompt must start with the task marker.
+    assert not is_openwebui_task("Why does <chat_history> show up in my export?")
