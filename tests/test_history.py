@@ -22,7 +22,8 @@ Paid orders grew 12% in March.
 
 _Assumed: paid orders only._
 
-<details><summary>Show SQL</summary>
+<details>
+<summary>Show SQL</summary>
 
 ```sql
 SELECT month, COUNT(*) AS orders FROM `p.sales.orders` GROUP BY month
@@ -58,6 +59,16 @@ def test_latest_user_text():
 def test_last_sql_comes_from_the_show_sql_block():
     assert last_sql(CHAT) == "SELECT month, COUNT(*) AS orders FROM `p.sales.orders` GROUP BY month"
     assert last_sql([{"role": "user", "content": "hello"}]) is None
+
+
+def test_answers_with_the_old_one_line_block_still_work():
+    # Answers from before the layout fix have <details><summary> on one line.
+    old_answer = PREVIOUS_ANSWER.replace("<details>\n<summary>", "<details><summary>")
+    assert "<details><summary>Show SQL</summary>" in old_answer
+    chat = [{"role": "assistant", "content": old_answer}]
+
+    assert last_sql(chat) == "SELECT month, COUNT(*) AS orders FROM `p.sales.orders` GROUP BY month"
+    assert "<details>" not in clean_history(chat)[0]["content"]
 
 
 def test_clean_history_keeps_words_and_sql_only():

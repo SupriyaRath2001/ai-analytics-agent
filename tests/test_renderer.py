@@ -314,7 +314,8 @@ def test_sql_block_layout():
     block = render_sql_block("\n  SELECT city\nFROM `p.sales.orders`  \n")
 
     assert block == (
-        "<details><summary>Show SQL</summary>\n"
+        "<details>\n"
+        "<summary>Show SQL</summary>\n"
         "\n"
         "```sql\n"
         "SELECT city\n"
