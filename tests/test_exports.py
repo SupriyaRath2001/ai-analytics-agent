@@ -1,6 +1,9 @@
+import csv
+import io
 import os
 import re
 import time
+from decimal import Decimal
 
 import pandas as pd
 import pytest
@@ -35,6 +38,52 @@ def test_csv_is_utf8_with_bom_and_has_no_index(store):
     raw = store.path_for(file_name).read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")
     assert raw.decode("utf-8-sig").splitlines() == ["city,amount", "München,1500", "Bengaluru,250"]
+
+
+def saved_rows(store, df):
+    """The saved CSV as the csv module reads it, header first. Bytes, so a \\r stays a \\r."""
+    raw = store.path_for(store.save_csv(df)).read_bytes().decode("utf-8-sig")
+    return list(csv.reader(io.StringIO(raw, newline="")))
+
+
+FORMULAS = ['=HYPERLINK("https://evil.example","Click")', "+91 98765 43210", "-2+3", "@SUM(A1)"]
+
+
+def test_text_that_starts_like_a_formula_gets_a_quote(store):
+    texts = [*FORMULAS, "\t=1+1", "\r=1+1"]
+    df = pd.DataFrame({"comment": [*texts, "plain = text", None]})
+
+    rows = saved_rows(store, df)
+
+    assert rows == [["comment"], *[["'" + text] for text in texts], ["plain = text"], [""]]
+
+
+def test_numbers_are_left_alone(store):
+    df = pd.DataFrame(
+        {
+            "change": [-5, 3],
+            "orders": pd.array([-1, None], dtype="Int64"),
+            "ratio": [-0.5, 1.5],
+            "refund": [Decimal("-2.50"), Decimal("1")],  # BigQuery NUMERIC: an object column
+            "mixed": pd.Series(["-x", Decimal("-7")], dtype=object),
+        }
+    )
+
+    rows = saved_rows(store, df)
+
+    assert rows == [
+        ["change", "orders", "ratio", "refund", "mixed"],
+        ["-5", "-1", "-0.5", "-2.50", "'-x"],
+        ["3", "", "1.5", "1", "-7"],
+    ]
+
+
+def test_quoting_does_not_change_the_callers_rows(store):
+    df = pd.DataFrame({"comment": FORMULAS})
+
+    store.save_csv(df)
+
+    assert df["comment"].tolist() == FORMULAS
 
 
 def test_png_is_saved_under_a_random_name(store):

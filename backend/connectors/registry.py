@@ -23,19 +23,3 @@ def create_connector(config: ConnectionConfig) -> BaseDBConnector:
             f"connection {config.name!r} has unknown type {config.type!r}; known types: {known}"
         )
     return connector_class(config)
-
-
-def build_connectors(configs: list[ConnectionConfig]) -> dict[str, BaseDBConnector]:
-    """Create and connect every enabled connection, keyed by connection name."""
-    connectors: dict[str, BaseDBConnector] = {}
-    for config in configs:
-        if not config.enabled:
-            continue
-        if config.name in connectors:
-            raise ValueError(
-                f"two enabled connections are named {config.name!r}; names must be unique"
-            )
-        connector = create_connector(config)
-        connector.connect()
-        connectors[config.name] = connector
-    return connectors

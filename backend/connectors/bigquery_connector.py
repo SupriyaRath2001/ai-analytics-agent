@@ -33,7 +33,10 @@ _SQL_HINTS = """\
 - Divide with SAFE_DIVIDE(a, b), so a zero divisor gives NULL instead of an error.
 - Don't use SELECT * on wide tables: select only the columns you need.
 - Add ORDER BY for top-N questions and time series.
-- TIMESTAMP values are in UTC. To group or filter by local day, use DATE(ts, '<timezone>')."""
+- LIMIT doesn't reduce the bytes BigQuery scans. For "sample rows" questions on big tables, put
+  TABLESAMPLE SYSTEM (1 PERCENT) right after the table name and keep the LIMIT.
+- TIMESTAMP values are in UTC. To group or filter by local day, use DATE(ts, tz) with the
+  timezone given in the prompt."""
 
 
 class BigQueryConnector(BaseDBConnector):
@@ -114,7 +117,7 @@ class BigQueryConnector(BaseDBConnector):
         top_counts = ", ".join(
             f"APPROX_TOP_COUNT(`{name}`, {limit + 1}) AS c{i}" for i, name in enumerate(names)
         )
-        sql = f"SELECT {top_counts} FROM `{table.qualified_name}`"
+        sql = f"SELECT {top_counts} FROM `{table.qualified_name}`{_profile_sample(table)}"
         job_config = bigquery.QueryJobConfig(maximum_bytes_billed=_PROFILE_MAX_BYTES_BILLED)
         try:
             job = self.client.query(sql, job_config=job_config)
@@ -314,6 +317,20 @@ def _walk_schema(
         path = f"{prefix}{field.name}"
         yield path, field
         yield from _walk_schema(field.fields, prefix=f"{path}.")
+
+
+def _profile_sample(table: TableMeta) -> str:
+    """A TABLESAMPLE clause for a table too big to profile in full under the 1 GiB cap, or "".
+
+    The percent is the largest whole number that keeps the expected scan under the cap, at
+    least 1. Rare values can be missed in a sample, which is fine for example values. Views
+    can't be sampled.
+    """
+    size = table.size_bytes
+    if table.table_type != "TABLE" or not size or size <= _PROFILE_MAX_BYTES_BILLED:
+        return ""
+    percent = max(1, _PROFILE_MAX_BYTES_BILLED * 100 // size)
+    return f" TABLESAMPLE SYSTEM ({percent} PERCENT)"
 
 
 def _low_cardinality_values(

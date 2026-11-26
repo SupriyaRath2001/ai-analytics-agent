@@ -77,6 +77,11 @@ def check_spec(spec: ChartSpec, df: pd.DataFrame) -> list[str]:
         problems.append(f"A {name} needs y_col, the column with the numbers.")
     if spec.chart_type == "heatmap" and not (spec.y_col and spec.value_col):
         problems.append("A heatmap needs y_col (the rows) and value_col (the number in each cell).")
+    if spec.chart_type in ("bar", "line") and _has_repeated_x(df, spec):
+        problems.append(
+            f"Several rows share the same {spec.x_col!r} value; set hue_col to the column that "
+            "splits them, or aggregate in SQL."
+        )
 
     number_col = _number_column(spec)
     if number_col is not None and number_col in df.columns:
@@ -212,6 +217,9 @@ def _heatmap_table(data: pd.DataFrame, spec: ChartSpec) -> pd.DataFrame:
         table = table.sort_index()
     if _is_ordered(table.columns):
         table = table.sort_index(axis=1)
+    # Sorted while the dates are still dates, then written as short labels.
+    table.index = _date_labels(table.index)
+    table.columns = _date_labels(table.columns)
     return table
 
 
@@ -256,6 +264,17 @@ def _number_column(spec: ChartSpec) -> str | None:
     return spec.value_col if spec.chart_type == "heatmap" else spec.y_col
 
 
+def _has_repeated_x(df: pd.DataFrame, spec: ChartSpec) -> bool:
+    """True when rows share an x value, or an (x, hue) pair when there is a hue.
+
+    Bars and lines add such rows up, which gives nonsense for averages, rates and shares.
+    """
+    keys = list(dict.fromkeys(column for column in (spec.x_col, spec.hue_col) if column))
+    if any(column not in df.columns for column in keys):
+        return False  # reported as a missing column instead
+    return bool(df.duplicated(subset=keys).any())
+
+
 def _prepare(df: pd.DataFrame, spec: ChartSpec) -> pd.DataFrame:
     """A copy of the columns the chart uses, converted to types seaborn handles well."""
     used = [spec.x_col, spec.y_col, spec.hue_col, spec.value_col]
@@ -265,7 +284,24 @@ def _prepare(df: pd.DataFrame, spec: ChartSpec) -> pd.DataFrame:
         data[number_col] = _as_numbers(data[number_col])
     if spec.chart_type in ("line", "scatter", "hist"):
         data[spec.x_col] = _continuous(data[spec.x_col])
+    elif spec.chart_type in ("bar", "box", "pie"):
+        data[spec.x_col] = _date_labels(data[spec.x_col])  # categories, not a time axis
+    if spec.hue_col:
+        data[spec.hue_col] = _date_labels(data[spec.hue_col])
     return data
+
+
+def _date_labels(values: pd.Series | pd.Index) -> pd.Series | pd.Index:
+    """Datetimes as short labels: 2024-01-31, or 2024-01-31 09:30 when not all are at midnight.
+
+    seaborn would write each one out in full, like 2024-01-31 00:00:00+00:00. Values that
+    aren't datetimes come back unchanged.
+    """
+    if not pd.api.types.is_datetime64_any_dtype(values):
+        return values
+    times = values.dt if isinstance(values, pd.Series) else values  # a table axis has no .dt
+    at_midnight = ((times.normalize() == values) | values.isna()).all()
+    return times.strftime("%Y-%m-%d" if at_midnight else "%Y-%m-%d %H:%M")
 
 
 def _as_numbers(column: pd.Series) -> pd.Series | None:

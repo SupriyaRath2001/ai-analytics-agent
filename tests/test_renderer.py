@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import numpy as np
@@ -83,18 +83,52 @@ def test_words_that_merely_end_in_id_are_still_amounts(column):
 
 
 @pytest.mark.parametrize(
+    "column",
+    ["phone_number", "mobile", "mobile_no", "order_no", "OrderNo", "invoice_num", "phoneNumber"],
+)
+def test_phone_and_order_numbers_get_no_separators(column):
+    assert format_cell(9876543210, column) == "9876543210"
+
+
+def test_number_words_count_only_as_the_last_word():
+    assert format_cell(1234567, "number_of_orders") == "1,234,567"
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         (1234.567, "1,234.57"),
-        (0.5, "0.5"),
+        (-1234.567, "-1,234.57"),
         (12.0, "12"),
-        (-0.001, "0"),
+        (1.004, "1"),
         (np.float32(1.25), "1.25"),
         (Decimal("1234567.891"), "1,234,567.89"),  # BigQuery NUMERIC
     ],
 )
-def test_fractions_get_at_most_two_decimals(value, expected):
+def test_numbers_from_one_up_get_at_most_two_decimals(value, expected):
     assert format_cell(value, "amount") == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0.0042, "0.0042"),
+        (0.01374, "0.0137"),
+        (0.5, "0.5"),
+        (-0.001, "-0.001"),
+        (0.0000001234, "0.000000123"),  # written out, not as 1.23e-07
+        (0.9996, "1"),
+        (np.float32(0.0042), "0.0042"),
+        (Decimal("0.000123456"), "0.000123"),
+    ],
+)
+def test_numbers_below_one_keep_three_significant_digits(value, expected):
+    assert format_cell(value, "conversion_rate") == expected
+
+
+@pytest.mark.parametrize("value", [0, 0.0, -0.0, Decimal("0.000"), Decimal("-0")])
+def test_zero_is_0(value):
+    assert format_cell(value, "amount") == "0"
 
 
 def test_dates_are_iso():
@@ -111,6 +145,39 @@ def test_dates_are_iso():
 )
 def test_timestamps_are_shown_to_the_second(value):
     assert format_cell(value, "created_at") == "2024-01-31 09:30:15"
+
+
+@pytest.mark.parametrize(
+    ("value", "timezone", "expected"),
+    [
+        (pd.Timestamp("2024-01-31 09:30:15", tz="UTC"), "Asia/Kolkata", "2024-01-31 15:00:15"),
+        (datetime(2024, 1, 31, 20, 0, tzinfo=UTC), "Asia/Kolkata", "2024-02-01 01:30:00"),
+        (pd.Timestamp("2024-01-15 12:00", tz="UTC"), "America/New_York", "2024-01-15 07:00:00"),
+        (pd.Timestamp("2024-07-15 12:00", tz="UTC"), "America/New_York", "2024-07-15 08:00:00"),
+        (pd.Timestamp("2024-01-31 15:00:15", tz="Asia/Kolkata"), "UTC", "2024-01-31 09:30:15"),
+    ],
+)
+def test_timestamps_with_a_zone_are_shown_in_the_configured_timezone(value, timezone, expected):
+    assert format_cell(value, "created_at", timezone=timezone) == expected
+
+
+@pytest.mark.parametrize(
+    "value", [datetime(2024, 1, 31, 9, 30, 15), np.datetime64("2024-01-31T09:30:15")]
+)
+def test_timestamps_without_a_zone_are_not_converted(value):  # BigQuery DATETIME
+    assert format_cell(value, "created_at", timezone="Asia/Kolkata") == "2024-01-31 09:30:15"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
+        pd.Timestamp(datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)),
+    ],
+)
+def test_the_end_of_time_is_not_pushed_past_year_9999(value):
+    # History tables use this for "no end date"; in Kolkata it would be in the year 10000.
+    assert format_cell(value, "valid_to", timezone="Asia/Kolkata") == "9999-12-31 23:59:59"
 
 
 @pytest.mark.parametrize("value", [None, float("nan"), pd.NA, pd.NaT, Decimal("NaN")])
@@ -174,6 +241,27 @@ def test_small_result_is_shown_in_full(store):
         f"[⬇️ Download CSV (2 rows)]({BASE_URL}/downloads/{result.csv_file})"
     )
     assert saved_rows(store, result.csv_file) == 2
+
+
+def test_chat_shows_local_time_but_the_csv_keeps_the_raw_value(store):
+    df = pd.DataFrame({"paid_at": [pd.Timestamp("2024-01-31 09:30:15", tz="UTC")]})
+
+    result = render_result(df, 1, store, OutputConfig(), timezone="Asia/Kolkata")
+
+    assert table_rows(result.markdown) == ["| 2024-01-31 15:00:15 |"]
+    csv_text = store.path_for(result.csv_file).read_text(encoding="utf-8-sig")
+    assert csv_text.splitlines() == ["paid_at", "2024-01-31 09:30:15+00:00"]
+
+
+def test_preview_also_shows_local_time(store):
+    paid_at = pd.Series(pd.date_range("2024-01-31 09:30", periods=30, freq="h", tz="UTC"))
+
+    result = render_result(
+        pd.DataFrame({"paid_at": paid_at}), 30, store, OutputConfig(), "Asia/Kolkata"
+    )
+
+    assert result.inline is False
+    assert table_rows(result.markdown)[0] == "| 2024-01-31 15:00:00 |"
 
 
 def test_20_rows_and_12_columns_still_fit_inline(store):

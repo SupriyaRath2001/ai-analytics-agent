@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.115",
+    "anyio>=4.0",  # imported directly in main.py to size the thread pool
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pyyaml>=6.0",
@@ -16,7 +17,7 @@ dependencies = [
     "db-dtypes>=1.2",
     "pandas>=2.2",
     "duckdb>=1.1",
-    "sqlglot>=25.0",
+    "sqlglot>=30,<31",  # the SQL guard matches sqlglot's expression classes by name
     "matplotlib>=3.9",
     "seaborn>=0.13",
     "tzdata>=2024.1",  # timezone names work even in slim images without system tz files

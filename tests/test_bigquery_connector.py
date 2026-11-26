@@ -3,15 +3,18 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import sqlglot
 from google.api_core.exceptions import BadRequest, Forbidden
 from google.cloud import bigquery
 from google.cloud.bigquery.dataset import DatasetListItem
 from google.cloud.bigquery.table import TableListItem
+from sqlglot import exp
 
 from backend.config import ConnectionConfig
 from backend.connectors import bigquery_connector
 from backend.connectors.base import ColumnMeta, QueryError, TableMeta
 from backend.connectors.bigquery_connector import BigQueryConnector, _human_bytes
+from backend.connectors.sql_guard import check_read_only
 
 PROJECT = "my-project"
 GIB = 1024**3
@@ -302,6 +305,54 @@ def test_profiling_runs_one_capped_query_over_top_level_string_columns():
     assert job_config.maximum_bytes_billed == GIB
 
 
+@pytest.mark.parametrize(
+    ("size_bytes", "percent"),
+    [
+        (GIB + 1, 99),
+        (2 * GIB, 50),
+        (3 * GIB, 33),
+        (150 * GIB, 1),  # 0.67 % would fit; 1 is the smallest sample
+    ],
+)
+def test_tables_over_1_gib_are_sampled_to_fit_the_cap(size_bytes, percent):
+    table = ORDERS_META.model_copy(update={"size_bytes": size_bytes})
+    client = FakeClient(jobs=[FakeJob(rows=[{"c0": []}])])
+
+    make_connector(client).sample_column_values(table, ["status"])
+
+    [(sql, job_config)] = client.queries
+    assert sql == (
+        "SELECT APPROX_TOP_COUNT(`status`, 16) AS c0 "
+        f"FROM `my-project.sales.orders` TABLESAMPLE SYSTEM ({percent} PERCENT)"
+    )
+    assert job_config.maximum_bytes_billed == GIB
+    # Valid GoogleSQL: the sample belongs to the table it follows, and nothing is lost on a
+    # round trip through the parser.
+    tree = sqlglot.parse_one(sql, read="bigquery")
+    [sampled] = [table for table in tree.find_all(exp.Table) if table.args.get("sample")]
+    assert sampled.name == "orders"
+    assert tree.sql("bigquery") == sql
+    assert check_read_only(sql, "bigquery") == (True, "")
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"size_bytes": GIB},
+        {"size_bytes": None},
+        {"size_bytes": 5 * GIB, "table_type": "VIEW"},
+    ],
+    ids=["exactly 1 GiB", "size unknown", "view"],
+)
+def test_small_tables_and_views_are_profiled_in_full(update):
+    client = FakeClient(jobs=[FakeJob(rows=[{"c0": []}])])
+
+    make_connector(client).sample_column_values(ORDERS_META.model_copy(update=update), ["status"])
+
+    [(sql, _)] = client.queries
+    assert "TABLESAMPLE" not in sql
+
+
 def test_profiling_keeps_only_columns_with_few_values():
     row = {
         "c0": [
@@ -536,6 +587,15 @@ def test_sql_hints_cover_the_googlesql_rules():
         assert rule in hints
     for rule in ["SAFE_DIVIDE", "SELECT *", "ORDER BY", "UTC", "DATE(ts, "]:
         assert rule in hints
+
+
+def test_sql_hints_point_to_the_prompts_timezone_and_explain_sampling():
+    hints = " ".join(make_connector(FakeClient()).sql_hints().split())
+
+    assert "<timezone>" not in hints  # a placeholder the model might copy as it is
+    assert "use DATE(ts, tz) with the timezone given in the prompt" in hints
+    assert "LIMIT doesn't reduce the bytes BigQuery scans" in hints
+    assert "TABLESAMPLE SYSTEM (1 PERCENT) right after the table name and keep the LIMIT" in hints
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,15 @@ import pandas as pd
 import pytest
 from db_dtypes import DateDtype
 
-from backend.services.charts import ChartSpec, _bar_order, _pie_slices, check_spec, render_chart
+from backend.services.charts import (
+    ChartSpec,
+    _bar_order,
+    _heatmap_table,
+    _pie_slices,
+    _prepare,
+    check_spec,
+    render_chart,
+)
 
 # seaborn 0.13 passes vert= to Axes.bxp, which matplotlib 3.11 deprecates. Not ours to fix.
 pytestmark = pytest.mark.filterwarnings("ignore:vert. bool was deprecated:DeprecationWarning")
@@ -24,11 +32,14 @@ SALES = pd.DataFrame(
 )
 
 SPECS = {
-    "bar": ChartSpec(chart_type="bar", x_col="city", y_col="orders", title="Orders by city"),
+    "bar": ChartSpec(
+        chart_type="bar", x_col="city", y_col="orders", hue_col="month", title="Orders by city"
+    ),
     "horizontal bar": ChartSpec(
         chart_type="bar",
         x_col="city",
         y_col="revenue",
+        hue_col="month",
         title="Revenue by city",
         horizontal=True,
         sort="desc",
@@ -93,8 +104,9 @@ def test_missing_column_is_named_with_the_available_ones():
 @pytest.mark.parametrize("chart_type", ["bar", "line", "scatter", "box", "pie"])
 def test_charts_of_numbers_need_y_col(chart_type):
     spec = ChartSpec(chart_type=chart_type, x_col="city", title="Orders")
+    one_row_per_city = SALES.drop_duplicates("city")
 
-    [problem] = check_spec(spec, SALES)
+    [problem] = check_spec(spec, one_row_per_city)
 
     assert "needs y_col" in problem
 
@@ -119,9 +131,9 @@ def test_heatmap_needs_y_col_and_value_col(left_out):
     ids=["bar y_col", "heatmap value_col"],
 )
 def test_plotted_values_must_be_numbers(spec):
-    [problem] = check_spec(spec, SALES)
+    problems = check_spec(spec, SALES)
 
-    assert problem.startswith("Column 'city' must hold numbers")
+    assert any(problem.startswith("Column 'city' must hold numbers") for problem in problems)
 
 
 def test_render_refuses_a_spec_with_problems():
@@ -178,12 +190,46 @@ def test_bar_top_n_and_sort():
     assert _bar_order(data, spec) == ["product 39", "product 38", "product 37"]
 
 
-def test_bars_add_up_repeated_categories_instead_of_averaging():
-    repeated = pd.DataFrame({"city": ["Pune", "Pune", "Delhi"], "orders": [10, 20, 5]})
-    totals = pd.DataFrame({"city": ["Pune", "Delhi"], "orders": [30, 5]})
-    spec = ChartSpec(chart_type="bar", x_col="city", y_col="orders", title="Orders")
+REPEATED_X = (
+    "Several rows share the same 'city' value; set hue_col to the column that splits them, "
+    "or aggregate in SQL."
+)
 
-    assert render_chart(repeated, spec) == render_chart(totals, spec)
+
+@pytest.mark.parametrize("chart_type", ["bar", "line"])
+def test_rows_that_share_an_x_value_are_refused(chart_type):
+    # SALES has a row per city and month: bars or lines by city alone would add the months up,
+    # which is wrong as soon as the numbers are averages or rates.
+    spec = ChartSpec(chart_type=chart_type, x_col="city", y_col="orders", title="Orders")
+
+    assert check_spec(spec, SALES) == [REPEATED_X]
+    with pytest.raises(ValueError, match="Several rows share the same 'city' value"):
+        render_chart(SALES, spec)
+
+
+@pytest.mark.parametrize("chart_type", ["bar", "line"])
+def test_hue_col_that_splits_the_rows_is_fine(chart_type):
+    spec = ChartSpec(
+        chart_type=chart_type, x_col="city", y_col="orders", hue_col="month", title="Orders"
+    )
+
+    assert check_spec(spec, SALES) == []
+
+
+def test_rows_that_share_an_x_and_hue_pair_are_refused():
+    twice = pd.concat([SALES, SALES.head(1)])  # Pune in January twice
+    spec = ChartSpec(
+        chart_type="bar", x_col="city", y_col="orders", hue_col="month", title="Orders"
+    )
+
+    assert check_spec(spec, twice) == [REPEATED_X]
+
+
+@pytest.mark.parametrize("chart_type", ["box", "scatter"])
+def test_other_charts_may_repeat_x_values(chart_type):
+    spec = ChartSpec(chart_type=chart_type, x_col="city", y_col="orders", title="Orders")
+
+    assert check_spec(spec, SALES) == []
 
 
 DAYS = [date(2024, 1, day) for day in (1, 2, 3, 4)]
@@ -204,6 +250,72 @@ def test_line_chart_with_dates_on_the_x_axis(days):
     assert png.startswith(b"\x89PNG")
     # The dates go on a time axis, in date order, so shuffled rows draw the same chart.
     assert render_chart(data.iloc[[2, 0, 3, 1]], spec) == png
+
+
+MIDNIGHTS = pd.Series(pd.to_datetime(["2024-01-02", "2024-01-01", "2024-01-03"]))
+TIMES = pd.Series(
+    pd.to_datetime(["2024-01-01 09:30:00", "2024-01-01 00:00:00", "2024-01-01 17:45:10"])
+)
+DAY_LABELS = ["2024-01-02", "2024-01-01", "2024-01-03"]
+TIME_LABELS = ["2024-01-01 09:30", "2024-01-01 00:00", "2024-01-01 17:45"]
+DATETIME_CATEGORIES = {
+    "TIMESTAMP at midnight": (MIDNIGHTS.dt.tz_localize("UTC"), DAY_LABELS),
+    "DATETIME at midnight": (MIDNIGHTS, DAY_LABELS),
+    "TIMESTAMP with times": (TIMES.dt.tz_localize("UTC"), TIME_LABELS),
+    "DATETIME with times": (TIMES, TIME_LABELS),
+}
+
+
+@pytest.mark.parametrize(
+    ("values", "labels"), DATETIME_CATEGORIES.values(), ids=DATETIME_CATEGORIES.keys()
+)
+@pytest.mark.parametrize("chart_type", ["bar", "box", "pie"])
+def test_datetime_categories_are_labelled_by_day_or_by_minute(chart_type, values, labels):
+    data = pd.DataFrame({"day": values, "orders": [5, 7, 6]})
+    spec = ChartSpec(chart_type=chart_type, x_col="day", y_col="orders", title="Orders per day")
+
+    assert _prepare(data, spec)["day"].tolist() == labels  # in the query's order
+    assert render_chart(data, spec).startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize("chart_type", ["bar", "box", "line"])
+def test_datetime_hue_groups_get_short_labels_too(chart_type):
+    data = pd.DataFrame(
+        {
+            "city": ["Pune", "Pune", "Delhi"],
+            "day": MIDNIGHTS.dt.tz_localize("UTC"),
+            "orders": [5, 7, 6],
+        }
+    )
+    spec = ChartSpec(
+        chart_type=chart_type, x_col="city", y_col="orders", hue_col="day", title="Orders"
+    )
+
+    assert _prepare(data, spec)["day"].tolist() == DAY_LABELS
+    assert render_chart(data, spec).startswith(b"\x89PNG")
+
+
+def test_heatmap_dates_are_sorted_then_labelled():
+    data = pd.DataFrame(
+        {
+            "day": pd.to_datetime(
+                ["2024-01-02", "2024-01-01", "2024-01-02", "2024-01-01"], utc=True
+            ),
+            "hour": pd.to_datetime(
+                ["2024-01-01 10:00", "2024-01-01 09:00", "2024-01-01 09:00", "2024-01-01 10:00"]
+            ),
+            "orders": [1, 2, 3, 4],
+        }
+    )
+    spec = ChartSpec(chart_type="heatmap", x_col="day", y_col="hour", value_col="orders", title="x")
+
+    table = _heatmap_table(_prepare(data, spec), spec)
+
+    assert list(table.columns) == ["2024-01-01", "2024-01-02"]
+    assert list(table.index) == ["2024-01-01 09:00", "2024-01-01 10:00"]
+    assert (table.columns.name, table.index.name) == ("day", "hour")  # they title the axes
+    assert table.to_numpy().tolist() == [[2, 3], [4, 1]]
+    assert render_chart(data, spec).startswith(b"\x89PNG")
 
 
 def test_dollar_signs_in_titles_and_labels_do_not_break_the_chart():

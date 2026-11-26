@@ -4,7 +4,7 @@ from backend.config import ConnectionConfig
 from backend.connectors import registry
 from backend.connectors.base import BaseDBConnector
 from backend.connectors.bigquery_connector import BigQueryConnector
-from backend.connectors.registry import CONNECTOR_TYPES, build_connectors, create_connector
+from backend.connectors.registry import CONNECTOR_TYPES, create_connector
 
 
 class FakeConnector(BaseDBConnector):
@@ -34,11 +34,6 @@ class FakeConnector(BaseDBConnector):
         raise NotImplementedError
 
 
-@pytest.fixture
-def fake_type(monkeypatch):
-    monkeypatch.setitem(registry.CONNECTOR_TYPES, "fake", FakeConnector)
-
-
 def test_bigquery_is_registered():
     assert CONNECTOR_TYPES["bigquery"] is BigQueryConnector
 
@@ -51,29 +46,20 @@ def test_create_connector_does_not_connect_yet():
     assert connector.client is None
 
 
+def test_a_new_type_needs_only_its_line_in_connector_types(monkeypatch):
+    monkeypatch.setitem(registry.CONNECTOR_TYPES, "fake", FakeConnector)
+
+    connector = create_connector(ConnectionConfig(name="shop", type="fake"))
+
+    assert isinstance(connector, FakeConnector)
+    assert connector.connected is False  # main.py connects each one itself
+
+
 def test_unknown_type_names_the_known_types():
     with pytest.raises(ValueError, match="'mysql'.*known types: bigquery"):
         create_connector(ConnectionConfig(name="shop", type="mysql"))
 
 
-def test_build_connectors_connects_enabled_connections_only(fake_type):
-    configs = [
-        ConnectionConfig(name="main", type="fake"),
-        ConnectionConfig(name="old", type="fake", enabled=False),
-        ConnectionConfig(name="second", type="fake"),
-    ]
-
-    connectors = build_connectors(configs)
-
-    assert list(connectors) == ["main", "second"]
-    assert all(connector.connected for connector in connectors.values())
-
-
-def test_duplicate_connection_names_are_rejected(fake_type):
-    configs = [
-        ConnectionConfig(name="main", type="fake"),
-        ConnectionConfig(name="main", type="fake"),
-    ]
-
-    with pytest.raises(ValueError, match="'main'"):
-        build_connectors(configs)
+def test_connectors_are_built_only_through_create_connector():
+    # build_connectors was a second, unused way to build them; main.py builds them one by one.
+    assert not hasattr(registry, "build_connectors")

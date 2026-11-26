@@ -32,6 +32,17 @@ _BLOCKED_FUNCTIONS = {"sleep", "benchmark", "load_file"}
 
 _ONLY_SELECT = "Only a single read-only SELECT query can run (WITH ... SELECT is fine)."
 
+# Neither shows up among the tables a dry run reports, so the dataset allowlist can't see them:
+# INFORMATION_SCHEMA lists every dataset and table, and EXTERNAL_QUERY reads another database.
+_NO_INFORMATION_SCHEMA = (
+    "INFORMATION_SCHEMA views can't be queried: metadata questions are answered from the "
+    "catalog. Query only the tables you were given."
+)
+_NO_EXTERNAL_QUERY = (
+    "EXTERNAL_QUERY() is not allowed: federated queries aren't allowed. "
+    "Query only the tables you were given."
+)
+
 
 def check_read_only(sql: str, dialect: str) -> tuple[bool, str]:
     """(True, "") when sql is exactly one read-only SELECT/WITH query, else (False, reason)."""
@@ -55,8 +66,12 @@ def check_read_only(sql: str, dialect: str) -> tuple[bool, str]:
         return False, _ONLY_SELECT
     for function in tree.find_all(exp.Func):
         name = _function_name(function)
+        if name == "external_query":
+            return False, _NO_EXTERNAL_QUERY
         if name in _BLOCKED_FUNCTIONS:
             return False, f"The function {name.upper()}() is not allowed. Remove it."
+    if any(_reads_information_schema(table) for table in tree.find_all(exp.Table)):
+        return False, _NO_INFORMATION_SCHEMA
     return True, ""
 
 
@@ -71,6 +86,13 @@ def _write_or_lock(tree: exp.Expression) -> str:
             if isinstance(node, node_type):
                 return label
     return ""
+
+
+def _reads_information_schema(table: exp.Table) -> bool:
+    # sqlglot keeps a backticked path like `region-us.INFORMATION_SCHEMA.TABLES` in fewer
+    # parts than it has dots, so every part is split again.
+    words = [word for part in table.parts for word in part.name.split(".")]
+    return any(word.upper() == "INFORMATION_SCHEMA" for word in words)
 
 
 def _function_name(function: exp.Func) -> str:

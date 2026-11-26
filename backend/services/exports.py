@@ -19,6 +19,10 @@ log = logging.getLogger(__name__)
 # Only names this store creates are accepted, which also blocks paths like "../config.yaml".
 _FILE_NAME = re.compile(r"[0-9a-f]{32}\.(csv|png)")
 
+# Excel and Google Sheets run a cell that starts with one of these as a formula, so a value like
+# =HYPERLINK("https://evil.example", "Click") in the data would become a live link.
+_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+
 
 class ExportStore:
     def __init__(self, export_dir: str | Path, public_base_url: str = "", ttl_hours: int = 24):
@@ -28,9 +32,12 @@ class ExportStore:
         self.ttl_hours = ttl_hours
 
     def save_csv(self, df: pd.DataFrame) -> str:
-        """Save the rows and return the file name. The BOM makes Excel read the file as UTF-8."""
+        """Save the rows and return the file name. The BOM makes Excel read the file as UTF-8.
+
+        Text that a spreadsheet would run as a formula gets a leading ' so it stays text.
+        """
         file_name = f"{uuid.uuid4().hex}.csv"
-        df.to_csv(self.export_dir / file_name, index=False, encoding="utf-8-sig")
+        _without_formulas(df).to_csv(self.export_dir / file_name, index=False, encoding="utf-8-sig")
         return file_name
 
     def save_png(self, data: bytes) -> str:
@@ -76,3 +83,19 @@ class ExportStore:
         except FileNotFoundError:
             return True
         return time.time() - modified > self.ttl_hours * 3600
+
+
+def _without_formulas(df: pd.DataFrame) -> pd.DataFrame:
+    """A copy of df with formula-like text quoted. Number columns are left alone."""
+    safe = df.copy()
+    for name, column in df.items():
+        if pd.api.types.is_string_dtype(column.dtype):  # also object columns
+            safe[name] = column.map(_quote_formula)
+    return safe
+
+
+def _quote_formula(value: object) -> object:
+    # Only str values: object columns also hold Decimals (NUMERIC), and -5 must stay a number.
+    if isinstance(value, str) and value.startswith(_FORMULA_STARTS):
+        return "'" + value
+    return value
