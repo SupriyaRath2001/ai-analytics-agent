@@ -111,8 +111,12 @@ def render_too_large(total_rows: int, max_rows: int) -> str:
 
 
 def render_sql_block(sql: str) -> str:
-    """A collapsed "Show SQL" section. Follow-up questions find the previous SQL in it."""
-    return f"<details><summary>Show SQL</summary>\n\n```sql\n{sql.strip()}\n```\n\n</details>"
+    """A collapsed "Show SQL" section. Follow-up questions find the previous SQL in it.
+
+    ``<details>`` and ``<summary>`` each end their own line: Open WebUI only turns them into a
+    collapsible block then. On one line, the chat shows the raw tags as text.
+    """
+    return f"<details>\n<summary>Show SQL</summary>\n\n```sql\n{sql.strip()}\n```\n\n</details>"
 
 
 def render_assumptions(assumptions: list[str]) -> str:

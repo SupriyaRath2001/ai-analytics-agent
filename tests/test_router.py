@@ -250,7 +250,7 @@ def test_inline_result_has_takeaway_table_csv_link_and_sql(kb, store):
         "| pending | 15 |",
         f"[{DOWNLOAD_ICON} Download CSV (3 rows)](/downloads/{csv_file})",
         "_Assumed: all time._",
-        f"<details><summary>Show SQL</summary>\n\n```sql\n{SQL}\n```\n\n</details>",
+        f"<details>\n<summary>Show SQL</summary>\n\n```sql\n{SQL}\n```\n\n</details>",
     )
     assert answer.endswith("</details>\n\n_Want a chart of this? Just ask._")
     assert connector.executed == [SQL]
@@ -395,7 +395,7 @@ def test_three_rejections_end_in_a_plain_failure_with_the_sql(kb, store):
         "\n\nI couldn't build a working query for this question.",
         "Last error: Syntax error: Unexpected keyword FROM at [1:10]",
         "Try rephrasing the question, or name the table to use.",
-        "<details><summary>Show SQL</summary>\n\n```sql\nSELECT 3 FROM broken\n```",
+        "<details>\n<summary>Show SQL</summary>\n\n```sql\nSELECT 3 FROM broken\n```",
     )
 
 
@@ -629,7 +629,7 @@ def test_metadata_with_many_tables_also_gets_the_catalog(many_tables_kb, store):
 def test_sql_prompt_has_the_rules_the_context_and_the_previous_sql(kb, store):
     previous = "SELECT status, COUNT(*) AS orders FROM `my-project.sales.orders` GROUP BY status"
     earlier_answer = (
-        "Most orders are paid.\n\n<details><summary>Show SQL</summary>\n\n"
+        "Most orders are paid.\n\n<details>\n<summary>Show SQL</summary>\n\n"
         f"```sql\n{previous}\n```\n\n</details>"
     )
     history = [user("Orders by status?"), {"role": "assistant", "content": earlier_answer}]

@@ -195,7 +195,7 @@ def df_to_markdown(df: pd.DataFrame) -> str             # tz-aware timestamps in
 def render_result(df: pd.DataFrame, total_rows: int, store: ExportStore, output: OutputConfig,
                   timezone: str = "UTC") -> RenderedResult   # the agent passes config.timezone
 def render_too_large(total_rows: int, max_rows: int) -> str
-def render_sql_block(sql: str) -> str                   # <details><summary>Show SQL</summary> + ```sql block
+def render_sql_block(sql: str) -> str                   # <details> / <summary>Show SQL</summary> lines + ```sql block
 def render_assumptions(assumptions: list[str]) -> str   # "" when empty, else "_Assumed: a; b._"
 ```
 Number formatting: thousands separators for numbers, except integer columns whose names look like ids,
@@ -352,7 +352,8 @@ message. The SQL loop is in `agent/sql_writer.py` (`write_and_run`) and the fixe
 
 _Assumed: last 30 days; paid orders only._
 
-<details><summary>Show SQL</summary>
+<details>
+<summary>Show SQL</summary>
 
 ```sql
 SELECT …
@@ -362,6 +363,9 @@ SELECT …
 
 _Want a chart of this? Just ask._
 ```
+
+`<details>` and `<summary>` each go on their own line. Open WebUI only draws the collapsible block
+then; with both on one line it shows the raw tags as text.
 
 ## 7. Code style ("humanly developed")
 
